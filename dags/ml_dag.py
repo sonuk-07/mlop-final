@@ -17,7 +17,7 @@ from pipelines.prepare_data import prepare_data
 from pipelines.hyperparameter import prepare_hyperparameters
 from pipelines.train_model import train_catboost_model
 
-from pipelines.config import CSV_PATH, REDIS_HOST, REDIS_PORT, RKEY_RAW
+from pipelines.config import CSV_PATH, REDIS_HOST, REDIS_PORT, RKEY_RAW, ARTIFACT_DIR
 
 log = logging.getLogger(__name__)
 
@@ -136,15 +136,18 @@ def train_model_from_redis():
     prep_dict = pickle.loads(prep_bytes)
     hyper_dict = pickle.loads(hyper_bytes)
 
+    # ✅ Pass ARTIFACT_DIR explicitly
     train_dict = train_catboost_model(
         prep_dict['X_train'], prep_dict['y_train'],
         prep_dict['X_test'], prep_dict['y_test'],
-        hyper_dict
+        hyper_dict,
+        ARTIFACT_DIR=ARTIFACT_DIR  # <-- fixed
     )
 
     r.set("pipeline:trained_model", pickle.dumps(train_dict))
     print(f"✅ Model trained and stored in Redis")
     return train_dict
+
 
 # ---------------------------
 # DAG definition
