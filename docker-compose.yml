@@ -1,4 +1,4 @@
-version: '3.8' # this is docker compose file version
+version: '3.8'
 services:
   mariadb-columnstore:
     image: mariadb/columnstore:latest
@@ -16,6 +16,7 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
   redis:
     image: redis:latest
     container_name: redis
@@ -24,9 +25,46 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/mlflow
+    command: mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlflow --host 0.0.0.0
+    restart: unless-stopped
+
+  fastapi:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: fastapi
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./artifacts:/opt/artifacts
+      - ./mlruns:/mlflow
+    depends_on:
+      - mariadb-columnstore
+      - redis
+      - mlflow
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+    container_name: streamlit
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./artifacts:/opt/artifacts
+    depends_on:
+      - fastapi
+    restart: unless-stopped
+
 volumes:
   redis_data:
   mariadb_data:
-
-    
-    
