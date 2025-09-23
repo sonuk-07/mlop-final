@@ -32,6 +32,9 @@ TrafficType = st.selectbox("TrafficType", [1,2,3,4,5,6,7,8,9])
 VisitorType = st.selectbox("VisitorType", ["Returning_Visitor","New_Visitor","Other"])
 Weekend = st.selectbox("Weekend", ["TRUE","FALSE"])
 
+# Convert Weekend to boolean
+Weekend_bool = True if Weekend == "TRUE" else False
+
 # -------------------------
 # Prediction button
 # -------------------------
@@ -53,39 +56,28 @@ if st.button("Predict Revenue"):
         "Region": Region,
         "TrafficType": TrafficType,
         "VisitorType": VisitorType,
-        "Weekend": Weekend
+        "Weekend": Weekend_bool
     }
-    
+
     # Call FastAPI
-    response = requests.post("http://fastapi:8000/predict", json=payload)
-    
-    if response.status_code == 200:
+    try:
+        response = requests.post("http://fastapi:8000/predict", json=payload)
+        response.raise_for_status()
         result = response.json()
+
         st.success(f"Predicted Revenue: {result['prediction']} ✅")
         st.info(f"Probability of Revenue=True: {result['probability']:.2f}")
 
-        # -------------------------
         # Save input + prediction to DB
-        # -------------------------
-        try:
-            db_password = os.getenv("MYSQL_PASSWORD", "Yunachan10")
-            db_url = f"mysql+pymysql://sonu:{db_password}@mariadb-columnstore:3306/shoppers_db"
-            engine = create_engine(db_url)
+        db_password = os.getenv("MYSQL_PASSWORD", "Yunachan10")
+        db_url = f"mysql+pymysql://sonu:{db_password}@mariadb-columnstore:3306/shoppers_db"
+        engine = create_engine(db_url)
 
-            # Convert input payload to DataFrame
-            df_to_save = pd.DataFrame([payload])
+        df_to_save = pd.DataFrame([payload])
+        df_to_save["Revenue"] = "TRUE" if result['prediction'] == 1 else "FALSE"
+        df_to_save.to_sql("shoppers_predictions", con=engine, if_exists='append', index=False)
 
-            # Add Revenue column as TRUE/FALSE
-            df_to_save["Revenue"] = df_to_save.apply(
-                lambda row: "TRUE" if result['prediction'] == 1 else "FALSE", axis=1
-            )
+        st.success("Prediction saved to database ✅")
 
-            # Save to a new table 'shoppers_predictions'
-            df_to_save.to_sql("shoppers_predictions", con=engine, if_exists='append', index=False)
-            st.success("Prediction saved to database ✅")
-
-        except Exception as e:
-            st.error(f"Failed to save prediction to DB: {e}")
-
-    else:
-        st.error("Prediction failed. Check API.")
+    except Exception as e:
+        st.error(f"Prediction or DB saving failed: {e}")

@@ -15,10 +15,10 @@ RKEY_RAW = "pipeline:raw_data"
 # Artifact directory for local storage
 ARTIFACT_DIR = os.getenv("ARTIFACT_DIR", "/home/sonu/mlop_final/artifacts")
 
-# MLflow configuration
+# MLflow configuration - Updated paths
 MLFLOW_TRACKING_URI = "http://localhost:5000"
-MLFLOW_ARTIFACT_ROOT = "/home/sonu/mlop_final/mlflow_data/artifacts"
+# Use local path instead of container path
+MLFLOW_ARTIFACT_ROOT = f"file://{ARTIFACT_DIR}"
 
 # Ensure directories exist
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
-os.makedirs(MLFLOW_ARTIFACT_ROOT, exist_ok=True)

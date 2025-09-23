@@ -1,34 +1,29 @@
-# pipelines/feature_engineering.py
 import pandas as pd
 import logging
-from typing import Dict
 
 log = logging.getLogger(__name__)
 
-def feature_engineer_data(df: pd.DataFrame) -> Dict:
+def feature_engineer_data(df: pd.DataFrame) -> dict:
     """
-    Performs feature engineering and separates features (X) and target (y).
-    Returns dict with 'X' and 'y' serialized for Redis storage.
+    Create behavioral features and separate X/y.
     """
     if df is None or df.empty:
-        raise ValueError("Input DataFrame is empty or None.")
+        raise ValueError("Input DataFrame is empty or None")
 
     df_fe = df.copy()
 
-    # ----- Create new features -----
-    if set(['Administrative_Duration', 'Informational_Duration', 'ProductRelated_Duration']).issubset(df_fe.columns):
-        df_fe['total_duration'] = df_fe[['Administrative_Duration','Informational_Duration','ProductRelated_Duration']].sum(axis=1)
-    if set(['Administrative','Informational','ProductRelated']).issubset(df_fe.columns):
-        df_fe['total_pages_visited'] = df_fe[['Administrative','Informational','ProductRelated']].sum(axis=1)
+    # Create features safely
+    df_fe['total_duration'] = df_fe.get('Administrative_Duration',0) + df_fe.get('Informational_Duration',0) + df_fe.get('ProductRelated_Duration',0)
+    df_fe['total_pages_visited'] = df_fe.get('Administrative',0) + df_fe.get('Informational',0) + df_fe.get('ProductRelated',0)
+    df_fe['ratio_product_duration'] = df_fe.get('ProductRelated_Duration',0) / df_fe['total_duration'].replace(0,1)
+    df_fe['bounce_per_page'] = df_fe.get('BounceRates',0) / df_fe['total_pages_visited'].replace(0,1)
+    df_fe['returning_visitor_flag'] = df_fe.get('VisitorType_Returning_Visitor',0)
+    df_fe['special_day_interaction'] = df_fe.get('SpecialDay',0) * df_fe.get('PageValues',0)
 
-    # ----- Split Features & Target -----
-    if "Revenue" not in df_fe.columns:
-        raise ValueError("Target column 'Revenue' not found in dataframe.")
-
-    X = pd.get_dummies(df_fe.drop('Revenue', axis=1), drop_first=True)
+    # Separate X and y
+    if 'Revenue' not in df_fe.columns:
+        raise ValueError("Target 'Revenue' not found")
+    X = df_fe.drop('Revenue', axis=1)
     y = df_fe['Revenue'].astype(int)
 
-    return {
-        "X": X.to_dict(orient='split'),
-        "y": y.tolist()
-    }
+    return {'X': X.to_dict(orient='split'), 'y': y.tolist()}

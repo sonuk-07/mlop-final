@@ -23,6 +23,7 @@ from pipelines.train_model import train_catboost_model
 from pipelines.config import CSV_PATH, REDIS_HOST, REDIS_PORT, RKEY_RAW, ARTIFACT_DIR
 
 log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # ---------------------------
 # Redis helpers
@@ -39,14 +40,14 @@ def bytes_to_df(b: bytes) -> pd.DataFrame:
     return pickle.loads(b)
 
 # ---------------------------
-# ML Pipeline Python tasks
+# ML Pipeline tasks
 # ---------------------------
 def ingest_and_cache():
     ingest_data()
     df = pd.read_csv(CSV_PATH)
     r = get_redis()
     r.set(RKEY_RAW, df_to_bytes(df))
-    print(f"✅ Stored {df.shape[0]} rows into Redis with key '{RKEY_RAW}'")
+    log.info(f"✅ Stored {df.shape[0]} rows into Redis with key '{RKEY_RAW}'")
 
 def validate_from_redis():
     r = get_redis()
@@ -56,7 +57,7 @@ def validate_from_redis():
     df = bytes_to_df(raw_bytes)
     validated_dict = validate_data(df)
     r.set("pipeline:validated_data", pickle.dumps(validated_dict))
-    print("✅ Validated data stored in Redis")
+    log.info("✅ Validated data stored in Redis")
     return validated_dict
 
 def preprocess_from_redis():
@@ -72,7 +73,7 @@ def preprocess_from_redis():
     )
     cleaned_dict = clean_data(df_validated)
     r.set("pipeline:cleaned_data", pickle.dumps(cleaned_dict))
-    print("✅ Preprocessed data stored in Redis")
+    log.info("✅ Preprocessed data stored in Redis")
     return cleaned_dict
 
 def feature_engineering_from_redis():
@@ -83,7 +84,7 @@ def feature_engineering_from_redis():
     df_cleaned = pd.DataFrame(**pickle.loads(cleaned_bytes))
     fe_dict = feature_engineer_data(df_cleaned)
     r.set("pipeline:fe_data", pickle.dumps(fe_dict))
-    print("✅ Feature engineered data stored in Redis")
+    log.info("✅ Feature engineered data stored in Redis")
     return fe_dict
 
 def prepare_data_from_redis():
@@ -92,16 +93,16 @@ def prepare_data_from_redis():
     if fe_bytes is None:
         raise ValueError("❌ No feature engineered data in Redis.")
     fe_dict = pickle.loads(fe_bytes)
-    prep_dict = prepare_data(fe_dict['X'], fe_dict['y'])
+    prep_dict = prepare_data(fe_dict['X'], fe_dict['y'], resample=True)
     r.set("pipeline:prepared_data", pickle.dumps(prep_dict))
-    print("✅ Prepared data stored in Redis")
+    log.info("✅ Prepared data stored in Redis")
     return prep_dict
 
 def hyperparameter_from_redis():
     r = get_redis()
     hyper_dict = prepare_hyperparameters()
     r.set("pipeline:hyperparameters", pickle.dumps(hyper_dict))
-    print(f"✅ Hyperparameters stored in Redis: {hyper_dict}")
+    log.info(f"✅ Hyperparameters stored in Redis: {hyper_dict}")
     return hyper_dict
 
 def train_model_from_redis():
@@ -117,13 +118,12 @@ def train_model_from_redis():
         prep_dict['X_train'], prep_dict['y_train'],
         prep_dict['X_test'], prep_dict['y_test'],
         hyper_dict,
-        ARTIFACT_DIR=ARTIFACT_DIR
+        threshold=0.3  # adjust threshold for better Revenue=1 recall
     )
 
     r.set("pipeline:trained_model", pickle.dumps(train_dict))
-    print(f"✅ Model trained, logged in MLflow, and stored in Redis (run_id={train_dict['mlflow_run_id']})")
+    log.info(f"✅ Model trained, logged in MLflow, and stored in Redis (run_id={train_dict['mlflow_run_id']})")
     return train_dict
-
 
 # ---------------------------
 # DAG definition
@@ -162,27 +162,7 @@ with DAG(
         task_id='docker_compose_up',
         bash_command=f"""
         cd {PROJECT_DIR}
-
-        start_container() {{
-            local name=$1
-            if [ "$(docker ps -q -f name=$name)" ]; then
-                echo "$name is already running. Skipping..."
-            else
-                if docker compose ps | grep -q $name; then
-                    echo "Starting $name..."
-                    docker compose up -d $name || echo "⚠️ Failed to start $name, but continuing..."
-                else
-                    echo "⚠️ $name service not defined in docker-compose.yml. Skipping..."
-                fi
-            fi
-        }}
-
-        start_container redis
-        start_container mcs_container
-        start_container mlflow
-        start_container fastapi
-        start_container streamlit
-
+        docker compose up -d
         """
     )
 
@@ -191,19 +171,11 @@ with DAG(
     # ---------------------------
     create_db_user = BashOperator(
         task_id="create_db_user",
-        bash_command="""
-        echo "Waiting for MariaDB to be ready..."
-        until docker exec mcs_container mariadb -uroot -proot &> /dev/null; do
-            echo "MariaDB not ready yet... retrying in 3s"
-            sleep 3
-        done
-        echo "MariaDB is ready. Creating database and user..."
+        bash_command=f"""
         docker exec -i mcs_container mariadb -uroot -proot -e "
         CREATE DATABASE IF NOT EXISTS shoppers_db;
         CREATE USER IF NOT EXISTS 'sonu'@'%' IDENTIFIED BY 'Yunachan10';
         GRANT ALL PRIVILEGES ON shoppers_db.* TO 'sonu'@'%';
-        CREATE USER IF NOT EXISTS 'sonu'@'localhost' IDENTIFIED BY 'Yunachan10';
-        GRANT ALL PRIVILEGES ON shoppers_db.* TO 'sonu'@'localhost';
         FLUSH PRIVILEGES;"
         """
     )

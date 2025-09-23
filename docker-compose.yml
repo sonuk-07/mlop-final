@@ -31,22 +31,24 @@ services:
     restart: unless-stopped
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.15.1
-    container_name: mlflow
-    ports:
-      - "5000:5000"
-    volumes:
-      # Map to your project directory so both container and host can access
-      - /home/sonu/mlop_final/mlflow_data:/mlflow
-    environment:
-      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow/mlflow.db
-      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
-    command: >
-      mlflow server
-      --backend-store-uri sqlite:///mlflow/mlflow.db
-      --default-artifact-root /mlflow/artifacts
-      --host 0.0.0.0
-
+      image: ghcr.io/mlflow/mlflow:v2.15.1
+      container_name: mlflow
+      ports:
+        - "5000:5000"
+      volumes:
+        - /home/sonu/mlop_final/mlflow_data:/mlflow
+      environment:
+        - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow/mlflow.db
+        - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+      user: "1000:1000"  # Add this line - use your user ID
+      command: >
+        sh -c "
+        mkdir -p /mlflow/artifacts &&
+        mlflow server
+        --backend-store-uri sqlite:///mlflow/mlflow.db
+        --default-artifact-root /mlflow/artifacts
+        --host 0.0.0.0
+        "
 
   fastapi:
     build:
@@ -56,8 +58,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./artifacts:/opt/artifacts
-      - ./mlruns:/mlflow
+      - ./artifacts:/opt/artifacts  # Only artifact folder
     environment:
       - DB_CONN=mariadb+pymysql://sonu:Yunachan10@mariadb-columnstore:3306/shoppers_db
       - REDIS_HOST=redis
@@ -69,6 +70,7 @@ services:
       - redis
       - mlflow
     restart: unless-stopped
+
 
   streamlit:
     build:
