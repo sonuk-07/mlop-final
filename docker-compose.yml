@@ -1,10 +1,14 @@
 version: '3.8'
+
 services:
   mariadb-columnstore:
     image: mariadb/columnstore:latest
     container_name: mcs_container
     environment:
       - MARIADB_ROOT_PASSWORD=rootpassword
+      - MARIADB_DATABASE=shoppers_db
+      - MARIADB_USER=sonu
+      - MARIADB_PASSWORD=Yunachan10
     ports:
       - "3306:3306"
     volumes:
@@ -27,14 +31,22 @@ services:
     restart: unless-stopped
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:latest
+    image: ghcr.io/mlflow/mlflow:v2.15.1
     container_name: mlflow
     ports:
       - "5000:5000"
     volumes:
-      - ./mlruns:/mlflow
-    command: mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlflow --host 0.0.0.0
-    restart: unless-stopped
+      # Map to your project directory so both container and host can access
+      - /home/sonu/mlop_final/mlflow_data:/mlflow
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow/mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+
 
   fastapi:
     build:
@@ -46,6 +58,12 @@ services:
     volumes:
       - ./artifacts:/opt/artifacts
       - ./mlruns:/mlflow
+    environment:
+      - DB_CONN=mariadb+pymysql://sonu:Yunachan10@mariadb-columnstore:3306/shoppers_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - ARTIFACT_DIR=/opt/artifacts
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
     depends_on:
       - mariadb-columnstore
       - redis
@@ -61,6 +79,9 @@ services:
       - "8501:8501"
     volumes:
       - ./artifacts:/opt/artifacts
+    environment:
+      - FASTAPI_URL=http://fastapi:8000
+      - ARTIFACT_DIR=/opt/artifacts
     depends_on:
       - fastapi
     restart: unless-stopped

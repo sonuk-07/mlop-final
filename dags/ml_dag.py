@@ -112,15 +112,18 @@ def train_model_from_redis():
         raise ValueError("❌ Prepared data or hyperparameters not found in Redis.")
     prep_dict = pickle.loads(prep_bytes)
     hyper_dict = pickle.loads(hyper_bytes)
+
     train_dict = train_catboost_model(
         prep_dict['X_train'], prep_dict['y_train'],
         prep_dict['X_test'], prep_dict['y_test'],
         hyper_dict,
         ARTIFACT_DIR=ARTIFACT_DIR
     )
+
     r.set("pipeline:trained_model", pickle.dumps(train_dict))
-    print(f"✅ Model trained and stored in Redis")
+    print(f"✅ Model trained, logged in MLflow, and stored in Redis (run_id={train_dict['mlflow_run_id']})")
     return train_dict
+
 
 # ---------------------------
 # DAG definition
@@ -153,7 +156,7 @@ with DAG(
     )
 
     # ---------------------------
-    # 2️⃣ Docker Compose up (safe)
+    # 2️⃣ Docker Compose up
     # ---------------------------
     docker_compose_up = BashOperator(
         task_id='docker_compose_up',
@@ -175,9 +178,11 @@ with DAG(
         }}
 
         start_container redis
-        start_container mariadb
-        start_container mlflow
         start_container mcs_container
+        start_container mlflow
+        start_container fastapi
+        start_container streamlit
+
         """
     )
 
