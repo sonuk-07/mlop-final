@@ -108,4 +108,9 @@ def train_catboost_model(
 
         log.info(f"Training completed. MLflow Run ID: {run.info.run_id}")
 
-    return {"model_path": model_path, "metrics": metrics, "mlflow_run_id": run.info.run_id}
+    return {
+    "model": model,  # <-- add the actual CatBoostClassifier object
+    "model_path": model_path,
+    "metrics": metrics,
+    "mlflow_run_id": run.info.run_id
+}

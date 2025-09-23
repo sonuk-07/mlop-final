@@ -4,10 +4,28 @@ import pandas as pd
 from sqlalchemy import create_engine
 import os
 import logging
+import redis
+import pickle
+import hashlib
+import json
 
+# -------------------------
+# Logging
+# -------------------------
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# -------------------------
+# Redis config
+# -------------------------
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB)
+
+# -------------------------
+# Streamlit setup
+# -------------------------
 st.set_page_config(page_title="Online Shoppers Revenue Prediction", layout="wide")
 st.title("Online Shoppers Revenue Prediction")
 
@@ -36,6 +54,25 @@ Weekend = st.selectbox("Weekend", ["TRUE","FALSE"])
 Weekend_bool = True if Weekend == "TRUE" else False
 
 # -------------------------
+# Helper functions
+# -------------------------
+def get_redis_key(payload: dict):
+    """Create a unique key for Redis based on input data."""
+    payload_str = json.dumps(payload, sort_keys=True)
+    return "prediction:" + hashlib.md5(payload_str.encode()).hexdigest()
+
+def save_prediction_to_redis(key: str, prediction_dict: dict, ttl=3600):
+    """Save prediction to Redis with optional expiration (seconds)."""
+    r.set(key, pickle.dumps(prediction_dict), ex=ttl)
+
+def get_prediction_from_redis(key: str):
+    """Retrieve prediction from Redis if available."""
+    data = r.get(key)
+    if data:
+        return pickle.loads(data)
+    return None
+
+# -------------------------
 # Prediction button
 # -------------------------
 if st.button("Predict Revenue"):
@@ -59,25 +96,36 @@ if st.button("Predict Revenue"):
         "Weekend": Weekend_bool
     }
 
-    # Call FastAPI
-    try:
-        response = requests.post("http://fastapi:8000/predict", json=payload)
-        response.raise_for_status()
-        result = response.json()
+    redis_key = get_redis_key(payload)
+    cached_result = get_prediction_from_redis(redis_key)
 
+    if cached_result:
+        st.info("⚡ Using cached prediction from Redis")
+        result = cached_result
+    else:
+        # Call FastAPI
+        try:
+            response = requests.post("http://fastapi:8000/predict", json=payload)
+            response.raise_for_status()
+            result = response.json()
+            save_prediction_to_redis(redis_key, result, ttl=3600)
+        except Exception as e:
+            st.error(f"Prediction failed: {e}")
+            result = None
+
+    if result:
         st.success(f"Predicted Revenue: {result['prediction']} ✅")
         st.info(f"Probability of Revenue=True: {result['probability']:.2f}")
 
-        # Save input + prediction to DB
-        db_password = os.getenv("MYSQL_PASSWORD", "Yunachan10")
-        db_url = f"mysql+pymysql://sonu:{db_password}@mariadb-columnstore:3306/shoppers_db"
-        engine = create_engine(db_url)
+        # Save input + prediction to MySQL DB
+        try:
+            db_password = os.getenv("MYSQL_PASSWORD", "Yunachan10")
+            db_url = f"mysql+pymysql://sonu:{db_password}@mariadb-columnstore:3306/shoppers_db"
+            engine = create_engine(db_url)
 
-        df_to_save = pd.DataFrame([payload])
-        df_to_save["Revenue"] = "TRUE" if result['prediction'] == 1 else "FALSE"
-        df_to_save.to_sql("shoppers_predictions", con=engine, if_exists='append', index=False)
-
-        st.success("Prediction saved to database ✅")
-
-    except Exception as e:
-        st.error(f"Prediction or DB saving failed: {e}")
+            df_to_save = pd.DataFrame([payload])
+            df_to_save["Revenue"] = "TRUE" if result['prediction'] == 1 else "FALSE"
+            df_to_save.to_sql("shoppers_predictions", con=engine, if_exists='append', index=False)
+            st.success("Prediction saved to database ✅")
+        except Exception as e:
+            st.error(f"Failed to save prediction to DB: {e}")

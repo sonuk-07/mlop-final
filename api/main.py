@@ -1,27 +1,75 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pandas as pd
 import pickle
 import redis
+from catboost import CatBoostClassifier, Pool
+import logging
 import os
 
+# --------------------------
+# Logging
+# --------------------------
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# --------------------------
+# FastAPI app
+# --------------------------
+app = FastAPI(title="Shoppers Prediction API")
+
+# --------------------------
+# Redis Config
+# --------------------------
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 MODEL_KEY = "pipeline:trained_model"
 
-app = FastAPI()
+r = None
+catboost_model: CatBoostClassifier = None
+feature_order = []
 
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+# --------------------------
+# Connect Redis & Load Model
+# --------------------------
+@app.on_event("startup")
+def load_model_from_redis():
+    global r, catboost_model, feature_order
 
-# ---------------------------
+    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
+    r.ping()
+    log.info("✅ Connected to Redis")
+
+    model_bytes = r.get(MODEL_KEY)
+    if model_bytes is None:
+        raise FileNotFoundError(f"Model not available in Redis with key {MODEL_KEY}")
+
+    train_dict = pickle.loads(model_bytes)
+    log.info(f"Keys in train_dict: {list(train_dict.keys())}")
+
+    # Try to detect model key automatically
+    if "model" in train_dict:
+        catboost_model = train_dict["model"]
+    elif "catboost_model" in train_dict:
+        catboost_model = train_dict["catboost_model"]
+    else:
+        raise KeyError(
+            f"Could not find model in Redis object. Keys available: {list(train_dict.keys())}"
+        )
+
+    feature_order = catboost_model.feature_names_
+    log.info("✅ CatBoost model loaded successfully from Redis")
+    log.info(f"Model expects {len(feature_order)} features.")
+
+# --------------------------
 # Input schema
-# ---------------------------
-class UserInput(BaseModel):
-    Administrative: int
+# --------------------------
+class ShopperData(BaseModel):
+    Administrative: float
     Administrative_Duration: float
-    Informational: int
+    Informational: float
     Informational_Duration: float
-    ProductRelated: int
+    ProductRelated: float
     ProductRelated_Duration: float
     BounceRates: float
     ExitRates: float
@@ -35,56 +83,52 @@ class UserInput(BaseModel):
     VisitorType: str
     Weekend: bool
 
-# ---------------------------
-# Helper functions
-# ---------------------------
-def preprocess_input(data: dict) -> pd.DataFrame:
-    df = pd.DataFrame([data])
+# --------------------------
+# Preprocess input
+# --------------------------
+def preprocess_input(df: pd.DataFrame, feature_order: list) -> pd.DataFrame:
+    df['total_duration'] = df['Administrative_Duration'] + df['Informational_Duration'] + df['ProductRelated_Duration']
+    df['total_pages_visited'] = df['Administrative'] + df['Informational'] + df['ProductRelated']
 
-    # Boolean to int
+    # Convert categorical
+    df['Month'] = df['Month'].astype(str)
+    df['VisitorType'] = df['VisitorType'].astype(str)
     df['Weekend'] = df['Weekend'].astype(int)
 
-    # One-hot encode Month
-    month_order = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'June',
-                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-    df['Month'] = pd.Categorical(df['Month'], categories=month_order, ordered=True)
-    df = pd.get_dummies(df, columns=['Month'], prefix='Month', drop_first=True)
+    # One-hot encode
+    df = pd.get_dummies(df, columns=['Month', 'VisitorType'], drop_first=False)
 
-    # One-hot encode VisitorType
-    df = pd.get_dummies(df, columns=['VisitorType'], prefix='VisitorType', drop_first=True)
+    # Add missing columns
+    for col in feature_order:
+        if col not in df.columns:
+            df[col] = 0
 
-    # Feature engineering (same as training)
-    df['total_duration'] = df[['Administrative_Duration','Informational_Duration','ProductRelated_Duration']].sum(axis=1)
-    df['total_pages_visited'] = df[['Administrative','Informational','ProductRelated']].sum(axis=1)
-    df['ratio_product_duration'] = df['ProductRelated_Duration'] / (df['total_duration'] + 1e-5)
-    df['bounce_per_page'] = df['BounceRates'] / (df['total_pages_visited'] + 1e-5)
-
+    # Reorder columns
+    df = df[feature_order]
     return df
 
-def load_model():
-    model_bytes = r.get(MODEL_KEY)
-    if model_bytes is None:
-        raise ValueError("Trained model not found in Redis.")
-    model_dict = pickle.loads(model_bytes)
-    with open(model_dict['model_path'], "rb") as f:
-        model = pickle.load(f)
-    return model
-
-# ---------------------------
-# API endpoints
-# ---------------------------
+# --------------------------
+# Prediction endpoint
+# --------------------------
 @app.post("/predict")
-def predict(input_data: UserInput):
-    df = preprocess_input(input_data.dict())
+def predict_revenue(data: ShopperData):
+    global catboost_model, feature_order
+    if catboost_model is None:
+        raise HTTPException(status_code=500, detail="Model not loaded")
 
-    model = load_model()
-    proba = model.predict_proba(df)[:,1][0]  # probability for Revenue=1
+    try:
+        df = pd.DataFrame([data.dict()])
+        df_preprocessed = preprocess_input(df, feature_order)
 
-    # Optionally adjust threshold for better Revenue=1 recall
-    threshold = 0.3
-    prediction = int(proba >= threshold)
+        pool = Pool(df_preprocessed)
+        prediction = catboost_model.predict(pool)
+        prediction_proba = catboost_model.predict_proba(pool)[:, 1]
 
-    return {
-        "prediction": prediction,
-        "probability": float(proba)
-    }
+        return {
+            "prediction": int(prediction[0]),
+            "probability": float(prediction_proba[0])
+        }
+
+    except Exception as e:
+        log.exception("Prediction failed")
+        raise HTTPException(status_code=500, detail=str(e))

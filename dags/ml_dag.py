@@ -23,11 +23,7 @@ from pipelines.train_model import train_catboost_model
 from pipelines.config import CSV_PATH, REDIS_HOST, REDIS_PORT, RKEY_RAW, ARTIFACT_DIR
 
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
-# ---------------------------
-# Redis helpers
-# ---------------------------
 def get_redis():
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT)
     r.ping()
@@ -47,7 +43,7 @@ def ingest_and_cache():
     df = pd.read_csv(CSV_PATH)
     r = get_redis()
     r.set(RKEY_RAW, df_to_bytes(df))
-    log.info(f"✅ Stored {df.shape[0]} rows into Redis with key '{RKEY_RAW}'")
+    print(f"✅ Stored {df.shape[0]} rows into Redis with key '{RKEY_RAW}'")
 
 def validate_from_redis():
     r = get_redis()
@@ -57,7 +53,7 @@ def validate_from_redis():
     df = bytes_to_df(raw_bytes)
     validated_dict = validate_data(df)
     r.set("pipeline:validated_data", pickle.dumps(validated_dict))
-    log.info("✅ Validated data stored in Redis")
+    print("✅ Validated data stored in Redis")
     return validated_dict
 
 def preprocess_from_redis():
@@ -73,7 +69,7 @@ def preprocess_from_redis():
     )
     cleaned_dict = clean_data(df_validated)
     r.set("pipeline:cleaned_data", pickle.dumps(cleaned_dict))
-    log.info("✅ Preprocessed data stored in Redis")
+    print("✅ Preprocessed data stored in Redis")
     return cleaned_dict
 
 def feature_engineering_from_redis():
@@ -84,7 +80,7 @@ def feature_engineering_from_redis():
     df_cleaned = pd.DataFrame(**pickle.loads(cleaned_bytes))
     fe_dict = feature_engineer_data(df_cleaned)
     r.set("pipeline:fe_data", pickle.dumps(fe_dict))
-    log.info("✅ Feature engineered data stored in Redis")
+    print("✅ Feature engineered data stored in Redis")
     return fe_dict
 
 def prepare_data_from_redis():
@@ -95,14 +91,14 @@ def prepare_data_from_redis():
     fe_dict = pickle.loads(fe_bytes)
     prep_dict = prepare_data(fe_dict['X'], fe_dict['y'], resample=True)
     r.set("pipeline:prepared_data", pickle.dumps(prep_dict))
-    log.info("✅ Prepared data stored in Redis")
+    print("✅ Prepared data stored in Redis")
     return prep_dict
 
 def hyperparameter_from_redis():
     r = get_redis()
     hyper_dict = prepare_hyperparameters()
     r.set("pipeline:hyperparameters", pickle.dumps(hyper_dict))
-    log.info(f"✅ Hyperparameters stored in Redis: {hyper_dict}")
+    print(f"✅ Hyperparameters stored in Redis: {hyper_dict}")
     return hyper_dict
 
 def train_model_from_redis():
@@ -118,12 +114,16 @@ def train_model_from_redis():
         prep_dict['X_train'], prep_dict['y_train'],
         prep_dict['X_test'], prep_dict['y_test'],
         hyper_dict,
-        threshold=0.3  # adjust threshold for better Revenue=1 recall
+        threshold=0.3
     )
 
+    # Save entire train_dict (model + metrics) to Redis
     r.set("pipeline:trained_model", pickle.dumps(train_dict))
-    log.info(f"✅ Model trained, logged in MLflow, and stored in Redis (run_id={train_dict['mlflow_run_id']})")
-    return train_dict
+    print(f"✅ Model trained, logged in MLflow, and stored in Redis (run_id={train_dict['mlflow_run_id']})")
+
+    # Don’t return the model object (to avoid XCom serialization issues)
+    return {"mlflow_run_id": train_dict['mlflow_run_id']}
+
 
 # ---------------------------
 # DAG definition
@@ -147,17 +147,11 @@ with DAG(
     tags=["mlops", "pipeline", "redis"],
 ) as dag:
 
-    # ---------------------------
-    # 1️⃣ Install requirements
-    # ---------------------------
     install_requirements = BashOperator(
         task_id="install_requirements",
         bash_command=f"pip install -r {PROJECT_DIR}/requirements.txt",
     )
 
-    # ---------------------------
-    # 2️⃣ Docker Compose up
-    # ---------------------------
     docker_compose_up = BashOperator(
         task_id='docker_compose_up',
         bash_command=f"""
@@ -166,9 +160,6 @@ with DAG(
         """
     )
 
-    # ---------------------------
-    # 3️⃣ Create MariaDB DB & user
-    # ---------------------------
     create_db_user = BashOperator(
         task_id="create_db_user",
         bash_command=f"""
@@ -180,9 +171,7 @@ with DAG(
         """
     )
 
-    # ---------------------------
-    # 4️⃣ ML pipeline tasks
-    # ---------------------------
+    # ML pipeline tasks
     ingest_task = PythonOperator(task_id="ingest_data_task", python_callable=ingest_and_cache)
     validate_task = PythonOperator(task_id="validate_data_task", python_callable=validate_from_redis)
     preprocess_task = PythonOperator(task_id="preprocess_data_task", python_callable=preprocess_from_redis)
@@ -191,9 +180,6 @@ with DAG(
     hyper_task = PythonOperator(task_id="hyperparameter_task", python_callable=hyperparameter_from_redis)
     train_task = PythonOperator(task_id="train_model_task", python_callable=train_model_from_redis)
 
-    # ---------------------------
-    # DAG dependencies
-    # ---------------------------
     install_requirements >> docker_compose_up >> create_db_user
     create_db_user >> ingest_task >> validate_task >> preprocess_task
     preprocess_task >> feature_task >> prepare_task >> hyper_task >> train_task
