@@ -6,6 +6,9 @@ import redis
 import pickle
 import logging
 from pathlib import Path
+from email.message import EmailMessage
+import smtplib
+import json
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -24,28 +27,33 @@ from pipelines.hyperparameter import prepare_hyperparameters
 from pipelines.train_model import train_catboost_model
 from pipelines.config import CSV_PATH, REDIS_HOST, REDIS_PORT, RKEY_RAW, ARTIFACT_DIR
 
-# Evidently imports for monitoring
+# Evidently imports
 from evidently.dashboard import Dashboard
 from evidently.dashboard.tabs import CatTargetDriftTab, DataDriftTab
 from evidently.model_profile import Profile
 from evidently.model_profile.sections import DataDriftProfileSection
 from evidently import ColumnMapping
 from sqlalchemy import create_engine
-import json
-from email.message import EmailMessage
-import smtplib
 
 log = logging.getLogger(__name__)
 
-# ---------- CONFIG ----------
+# ---------------------------
+# CONFIG
+# ---------------------------
 DB_URL = "mysql+pymysql://sonu:Yunachan10@127.0.0.1:3306/shoppers_db"
 REFERENCE_TABLE = "shoppers_data"
 CURRENT_TABLE = "shoppers_predictions"
 TARGET_COL = "Revenue"
-REPORT_DIR = Path(PROJECT_DIR) / "reports/evidently"
-REPORT_DIR.mkdir(parents=True, exist_ok=True)
 MAX_ROWS = 1000
 
+# Reports folder structure
+REPORT_DIR = Path(PROJECT_DIR) / "reports/evidently"
+CONCEPT_DRIFT_DIR = REPORT_DIR / "concept_drift"
+DATA_DRIFT_DIR = REPORT_DIR / "data_drift"
+CONCEPT_DRIFT_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DRIFT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Email config
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 SENDER_EMAIL = os.getenv("SENDER_EMAIL", "youremail@gmail.com")
@@ -150,11 +158,11 @@ def train_model_from_redis():
         threshold=0.3
     )
     r.set("pipeline:trained_model", pickle.dumps(train_dict))
-    print(f"✅ Model trained, logged in MLflow, and stored in Redis (run_id={train_dict['mlflow_run_id']})")
+    print(f"✅ Model trained, logged in MLflow, stored in Redis (run_id={train_dict['mlflow_run_id']})")
     return {"mlflow_run_id": train_dict['mlflow_run_id']}
 
 # ---------------------------
-# Evidently monitoring
+# Evidently monitoring tasks
 # ---------------------------
 def send_email_alert(report_path, report_type="Data/Concept Drift"):
     msg = EmailMessage()
@@ -185,7 +193,8 @@ def monitor_concept_drift_task():
 
     feature_cols = [col for col in ref_df.columns if col != TARGET_COL]
     ref_data = ref_df[feature_cols + [TARGET_COL]]
-    cur_data = cur_df[feature_cols + [TARGET_COL]].copy()
+    cur_data = cur_df[feature_cols + ["prediction"]].copy()
+    cur_data.rename(columns={"prediction": TARGET_COL}, inplace=True)
 
     column_mapping = ColumnMapping()
     column_mapping.target = TARGET_COL
@@ -194,7 +203,7 @@ def monitor_concept_drift_task():
     dashboard.calculate(reference_data=ref_data, current_data=cur_data, column_mapping=column_mapping)
 
     ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-    report_path = REPORT_DIR / f"concept_drift_report_{ts}.html"
+    report_path = CONCEPT_DRIFT_DIR / f"concept_drift_report_{ts}.html"
     dashboard.save(report_path)
     print(f"✅ Concept drift report saved at {report_path}")
     send_email_alert(report_path, report_type="Concept Drift")
@@ -203,7 +212,6 @@ def monitor_concept_drift_task():
 def monitor_data_drift_task():
     ref_df = pd.read_sql(f"SELECT * FROM {REFERENCE_TABLE}", con=engine)
     cur_df = pd.read_sql(f"SELECT * FROM {CURRENT_TABLE}", con=engine)
-
     if ref_df.empty or cur_df.empty:
         print("Skipping data drift: empty dataset")
         return
@@ -219,11 +227,10 @@ def monitor_data_drift_task():
     dashboard.calculate(ref_data, cur_data)
 
     ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-    report_path = REPORT_DIR / f"data_drift_report_{ts}.html"
+    report_path = DATA_DRIFT_DIR / f"data_drift_report_{ts}.html"
     dashboard.save(report_path)
     print(f"✅ Data drift report saved at {report_path}")
 
-    # Programmatic detection
     profile = Profile(sections=[DataDriftProfileSection()])
     profile.calculate(ref_data, cur_data)
     profile_data = json.loads(profile.json())
@@ -235,7 +242,6 @@ def monitor_data_drift_task():
         send_email_alert(report_path, report_type="Data Drift")
     else:
         print("✅ No data drift detected.")
-
 
 # ---------------------------
 # DAG definition
@@ -252,13 +258,14 @@ default_args = {
 with DAG(
     dag_id="shoppers_full_pipeline",
     default_args=default_args,
-    description="Full ML pipeline with Docker Compose, Redis, MariaDB and Evidently monitoring",
+    description="Full ML pipeline with Docker, Redis, MariaDB, and Evidently monitoring",
     schedule="@daily",
     start_date=datetime(2025, 9, 1),
     catchup=False,
     tags=["mlops", "pipeline", "redis", "monitoring"],
 ) as dag:
 
+    # ----- Bash Operators -----
     install_requirements = BashOperator(
         task_id="install_requirements",
         bash_command=f"pip install -r {PROJECT_DIR}/requirements.txt",
@@ -280,6 +287,7 @@ with DAG(
         """
     )
 
+    # ----- Python Operators -----
     ingest_task = PythonOperator(task_id="ingest_data_task", python_callable=ingest_and_cache)
     validate_task = PythonOperator(task_id="validate_data_task", python_callable=validate_from_redis)
     preprocess_task = PythonOperator(task_id="preprocess_data_task", python_callable=preprocess_from_redis)
@@ -291,9 +299,7 @@ with DAG(
     concept_drift_task = PythonOperator(task_id="concept_drift_task", python_callable=monitor_concept_drift_task)
     data_drift_task = PythonOperator(task_id="data_drift_task", python_callable=monitor_data_drift_task)
 
-    # ---------------------------
-    # DAG dependency
-    # ---------------------------
+    # ----- DAG Dependencies -----
     install_requirements >> docker_compose_up >> create_db_user
     create_db_user >> ingest_task >> validate_task >> preprocess_task
     preprocess_task >> feature_task >> prepare_task >> hyper_task >> train_task
