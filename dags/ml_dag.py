@@ -20,7 +20,7 @@ from pipelines.validate_data import validate_data
 from pipelines.preprocess import clean_data
 from pipelines.feature_engineering import feature_engineer_data
 from pipelines.prepare_data import prepare_data
-from pipelines.hyperparameter import prepare_hyperparameters
+from pipelines.hyperparameter import tune_catboost
 from pipelines.train_model import train_catboost_model
 from pipelines.config import CSV_PATH, REDIS_HOST, REDIS_PORT, RKEY_RAW, ARTIFACT_DIR
 
@@ -129,10 +129,21 @@ def prepare_data_from_redis():
 
 def hyperparameter_from_redis():
     r = get_redis()
-    hyper_dict = prepare_hyperparameters()
-    r.set("pipeline:hyperparameters", pickle.dumps(hyper_dict))
-    print(f"✅ Hyperparameters stored in Redis: {hyper_dict}")
-    return hyper_dict
+
+    # Load prepared data for training from Redis
+    prep_bytes = r.get("pipeline:prepared_data")
+    if prep_bytes is None:
+        raise ValueError("❌ Prepared data not found in Redis.")
+    prep_dict = pickle.loads(prep_bytes)
+
+    X_train_res = pd.DataFrame(**prep_dict['X_train'])
+    y_train_res = pd.Series(prep_dict['y_train'])
+
+    best_hyperparams = tune_catboost(X_train_res, y_train_res, n_trials=30)
+    r.set("pipeline:hyperparameters", pickle.dumps(best_hyperparams))
+    log.info(f"✅ Best hyperparameters stored in Redis: {best_hyperparams}")
+    return best_hyperparams
+
 
 def train_model_from_redis():
     r = get_redis()
